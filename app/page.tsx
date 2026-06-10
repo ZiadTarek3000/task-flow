@@ -10,13 +10,14 @@ export default function HomePage() {
             Manage Your Tasks, Simply.
           </h1>
           <p className="text-xl text-gray-600 mb-8">
-            Stay organized, focused, and in control of your day.
+            Stay organized, focused, and in control of your day. No sign-up —
+            jump straight in, and sign in only when you want to save your work.
           </p>
           <Link
-            href="/signup"
+            href="/dashboard"
             className="inline-block px-6 py-3 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors font-medium"
           >
-            Get Started - Sign Up
+            Open the Dashboard
           </Link>
         </div>
       </section>

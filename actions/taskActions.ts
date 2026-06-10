@@ -2,50 +2,51 @@
 
 import { revalidatePath, revalidateTag } from 'next/cache'
 import { redirect } from 'next/navigation'
-import { headers } from 'next/headers'
 import {
+  clearGuestCookie,
   createSession,
   destroySession,
   getSession,
 } from '@/lib/auth'
-import {
-  createUser,
-  ensureUser,
-  findUserByEmail,
-  getUserAuthByEmail,
-} from '@/lib/db/users'
-import { hashPassword, verifyPassword } from '@/lib/passwords'
+import { claimGuestData, ensureUser } from '@/lib/db/users'
 import { addTask, updateTask, deleteTask } from '@/lib/tasks'
-import { createSupabaseServerClient } from '@/lib/supabase'
 import type { TaskStatus, TaskPriority } from '@/types'
 
-import { getBaseUrl } from '@/lib/request'
+export async function loginAction(formData: FormData): Promise<void> {
+  const email = `${formData.get('email') ?? ''}`.trim().toLowerCase()
+  const password = `${formData.get('password') ?? ''}`
 
-export async function signInWithGoogleAction(): Promise<void> {
-  const supabase = await createSupabaseServerClient()
-  
-  if (!supabase) {
-    console.error('Supabase is not configured.')
-    redirect('/login?error=auth')
+  if (!email || !password) {
+    redirect('/login?error=missing')
   }
 
-  const baseUrl = await getBaseUrl()
-
-  const { data, error } = await supabase.auth.signInWithOAuth({
-    provider: 'google',
-    options: {
-      redirectTo: `${baseUrl}/auth/callback`,
-    },
-  })
-
-  if (error) {
-    console.error('Google sign-in error:', error.message)
-    redirect('/login?error=auth')
+  if (!isValidEmail(email)) {
+    redirect('/login?error=email')
   }
 
-  if (data.url) {
-    redirect(data.url)
+  // No real authentication: any password is accepted. The email is just the key
+  // a user's tasks are stored against.
+  const current = await getSession()
+  const user = await ensureUser({ email, name: deriveName(email) })
+
+  // Carry the visitor's guest tasks over to their named account so "sign in to
+  // save your tasks" actually saves what they were just working on.
+  if (current?.isGuest) {
+    await claimGuestData(current.id, user.id)
   }
+
+  await createSession(user)
+  await clearGuestCookie()
+
+  redirect('/dashboard')
+}
+
+export async function logoutAction(): Promise<void> {
+  // Drop the named session and the (already-cleared) guest cookie; the next
+  // navigation mints a fresh guest, returning the visitor to instant access.
+  await destroySession()
+  await clearGuestCookie()
+  redirect('/')
 }
 
 export async function addTaskAction(formData: FormData): Promise<void> {
@@ -108,148 +109,16 @@ export async function toggleTaskStatusAction(
   revalidateTag('tasks', 'max')
 }
 
-export async function loginAction(
-  formData: FormData
-): Promise<void> {
-  const email = normalizeEmail(`${formData.get('email') ?? ''}`)
-  const password = `${formData.get('password') ?? ''}`
-
-  // 1. Try Supabase Auth first
-  const supabase = await createSupabaseServerClient()
-  if (supabase) {
-    const { data, error } = await supabase.auth.signInWithPassword({
-      email,
-      password,
-    })
-
-    if (!error && data.user) {
-      if (!data.user.email_confirmed_at) {
-        redirect('/login?error=unverified')
-      }
-
-      const user = await ensureUser({
-        email: data.user.email!,
-        name: data.user.user_metadata.full_name || data.user.user_metadata.name || 'User',
-      })
-      await createSession(user)
-      redirect('/dashboard')
-    }
-  }
-
-  // 2. Fallback to local legacy auth (Prisma + local passwords)
-  if (email === 'ahmed@taskflow.com' && password === 'password123') {
-    const user = await ensureUser({
-      email,
-      name: 'Ahmed',
-    })
-    await createSession(user)
-    redirect('/dashboard')
-  }
-
-  const existingUser = await getUserAuthByEmail(email)
-
-  if (
-    existingUser?.passwordHash &&
-    await verifyPassword(password, existingUser.passwordHash)
-  ) {
-    await createSession(existingUser.user)
-    redirect('/dashboard')
-  }
-
-  redirect('/login?error=invalid')
-}
-
-export async function registerAction(
-  formData: FormData
-): Promise<void> {
-  const name = `${formData.get('name') ?? ''}`.trim()
-  const email = normalizeEmail(`${formData.get('email') ?? ''}`)
-  const password = `${formData.get('password') ?? ''}`
-  const confirmPassword = `${formData.get('confirmPassword') ?? ''}`
-
-  if (!name || !email || !password || !confirmPassword) {
-    redirect('/signup?error=missing')
-  }
-
-  if (!isValidEmail(email)) {
-    redirect('/signup?error=email')
-  }
-
-  if (password.length < 8) {
-    redirect('/signup?error=weak')
-  }
-
-  if (password !== confirmPassword) {
-    redirect('/signup?error=mismatch')
-  }
-
-  // 1. Try Supabase Auth first
-  const supabase = await createSupabaseServerClient()
-  if (supabase) {
-    const baseUrl = await getBaseUrl()
-    const { data, error } = await supabase.auth.signUp({
-      email,
-      password,
-      options: {
-        emailRedirectTo: `${baseUrl}/auth/callback`,
-        data: {
-          full_name: name,
-        },
-      },
-    })
-    console.log('SIGNUP DATA:', data)
-    console.log('SIGNUP ERROR:', error)  
-
-    if (!error && data.user) {
-      // For new registrations, we don't create a local session or sync with DB
-      // until the email is verified. Supabase handles the verification email.
-      if (!data.user.email_confirmed_at) {
-        redirect('/signup?success=unverified')
-      }
-
-      const user = await ensureUser({
-        email: data.user.email!,
-        name: name,
-      })
-      await createSession(user)
-      redirect('/dashboard')
-    } else if (error) {
-      console.error('Supabase registration error:', error.message)
-      // If Supabase fails (e.g., user exists or other error), we might want to handle it
-      // But we still have the local fallback for existing users
-    }
-  }
-
-  // 2. Fallback to local legacy auth
-  const existingUser = await findUserByEmail(email)
-
-  if (existingUser) {
-    redirect('/signup?error=exists')
-  }
-
-  const user = await createUser({
-    name,
-    email,
-    passwordHash: await hashPassword(password),
-  })
-
-  await createSession(user)
-  redirect('/dashboard')
-}
-
-export async function logoutAction(): Promise<void> {
-  await destroySession()
-  redirect('/')
-}
-
 async function requireAuthenticatedUser() {
-  const session = await getSession()
+  const user = await getSession()
 
-  if (!session) {
-    redirect('/login')
+  if (!user) {
+    // No session yet (e.g. cookies disabled). Bounce home; `proxy.ts` mints a
+    // guest on the way back.
+    redirect('/')
   }
 
-  return session
+  return user
 }
 
 function parseTaskFormData(formData: FormData): {
@@ -283,11 +152,11 @@ function parseTaskFormData(formData: FormData): {
   }
 }
 
-function normalizeEmail(email: string): string {
-  return email.trim().toLowerCase()
-}
-
 function isValidEmail(email: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
 }
 
+function deriveName(email: string): string {
+  const localPart = email.split('@')[0] ?? 'User'
+  return localPart.charAt(0).toUpperCase() + localPart.slice(1)
+}

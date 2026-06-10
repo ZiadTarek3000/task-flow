@@ -14,4 +14,6 @@ export type User = {
   id: string
   name: string
   email: string
+  // True when this is an anonymous guest session (instant access, no sign-in).
+  isGuest?: boolean
 }
